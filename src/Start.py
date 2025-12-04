@@ -1,3 +1,27 @@
+"""
+메인 실행 파일 및 시나리오 분류 파이프라인
+
+이 모듈은 시나리오 분류기 시스템의 메인 실행 파일로, 전체 파이프라인을
+구현합니다. 주요 컴포넌트:
+- ScenarioLabeler: 4단계 Rule-based 시나리오 분류기
+- CustomScenarioVisualizer: 시나리오 시각화 엔진
+- ScenarioExporter: JSON 출력 모듈
+- process_log_file: 메인 파이프라인 함수
+
+처리 파이프라인:
+    1. 맵 데이터 로딩 (MapManager)
+    2. JSON 로그 로딩 및 파싱 (JsonLogLoader)
+    3. 시나리오 윈도우 추출 (101-epoch 윈도우)
+    4. 시나리오 분류 (ScenarioLabeler)
+    5. JSON 출력 (ScenarioExporter)
+    6. 시각화 (CustomScenarioVisualizer, 선택적)
+
+참조:
+    - doc/01_architecture.md: 시스템 아키텍처 및 데이터 흐름
+    - doc/03_scenario_labeler.md: 시나리오 분류 알고리즘 상세
+    - doc/06_visualization.md: 시각화 시스템 설명
+"""
+
 import os
 import sys
 import json
@@ -26,14 +50,46 @@ from nuplan.common.actor_state.tracked_objects_types import TrackedObjectType
 
 class ScenarioLabeler:
     """
-    Rule-based 시나리오 분류
-    - 자율주행 데이터에서 다양한 주행 시나리오를 자동으로 라벨링
+    Rule-based 4단계 시나리오 분류 파이프라인.
     
-    stages:
-    1. State-based (speed, position, proximity)
-    2. Behavior-based (trajectory analysis)
-    3. Interaction-based (multi-agent)
-    4. Dynamics-based (jerk, lateral acceleration)
+    ScenarioLabeler는 101-epoch 시나리오 윈도우를 입력받아 다양한 주행 시나리오를
+    자동으로 라벨링하는 핵심 컴포넌트입니다. 4단계 분류 파이프라인을 통해
+    명시적 상태, 행동, 상호작용, 동역학 특성을 분석합니다.
+    
+    분류 단계:
+        1. State-based Classification (명시적 상태 분류)
+           - 속도 프로파일 (저속/중속/고속)
+           - 정지 상태 감지
+           - 근접 객체 분류
+        
+        2. Behavior-based Classification (궤적 기반 행동 분류)
+           - 회전 감지 (좌회전/우회전, 고속/저속)
+           - 차선변경 감지 (좌측/우측)
+        
+        3. Interaction-based Classification (상호작용 기반 분류)
+           - 선행차 추종 (일반/느린 선행차/선행차 없음)
+           - 다중 객체 판단 (다중 차량/보행자)
+        
+        4. Dynamics-based Classification (동역학 분류)
+           - Jerk 계산 (급가속/급감속)
+           - 측면 가속도 계산
+    
+    신뢰도 할당:
+        각 라벨에는 0.0~1.0 범위의 신뢰도가 할당됩니다.
+        - State-based: 0.95~0.99 (매우 높음)
+        - Map-based: 0.90~0.95
+        - Behavior-based: 0.80~0.85
+        - Interaction-based: 0.80~0.90
+        - Dynamics-based: 0.95
+    
+    사용 예시:
+        labeler = ScenarioLabeler(map_manager=map_manager, hz=20.0)
+        labeled_window = labeler.classify(window)
+        # window.labels에 ScenarioLabel 리스트가 채워짐
+    
+    참조:
+        - doc/03_scenario_labeler.md: 분류 알고리즘 상세 설명
+        - doc/02_data_structures.md: ScenarioLabel 및 ScenarioWindow 구조
     """
     
     # Configuration constants
@@ -1137,8 +1193,80 @@ def process_log_file(log_file_path: str,
                     max_scenarios: int = -1,
                     step_size: int = 1):
     """
-    JSON 로그 파일 처리를 위한 main pipeline
-    - 로그 데이터 로딩 후 시나리오 라벨링 및 시각화 수행
+    JSON 로그 파일을 처리하는 메인 파이프라인 함수.
+    
+    전체 시나리오 분류 파이프라인을 실행합니다:
+    1. 맵 데이터 로딩 (MapManager)
+    2. JSON 로그 로딩 및 파싱 (JsonLogLoader)
+    3. 시나리오 윈도우 추출 (101-epoch 윈도우)
+    4. 시나리오 분류 (ScenarioLabeler)
+    5. JSON 출력 (ScenarioExporter)
+    6. 시각화 (CustomScenarioVisualizer, 선택적)
+    
+    Args:
+        log_file_path (str): JSON 로그 파일 경로
+            DefaultParams.LOG_FILE_NAME에서 지정된 경로를 사용합니다.
+        
+        map_manager (Optional[MapManager]): 맵 매니저 인스턴스
+            None인 경우 자동으로 생성됩니다.
+            DefaultParams.MAP_FILE_PATH를 사용하여 맵 데이터베이스를 로드합니다.
+        
+        output_dir_json (str): JSON 출력 디렉토리 (기본값: "./labeled_scenarios")
+            각 시나리오는 개별 JSON 파일로 저장되며, scenarios_summary.json도 생성됩니다.
+        
+        output_dir_viz (str): 시각화 이미지 출력 디렉토리 (기본값: "./imgs")
+            visualize=True인 경우에만 사용됩니다.
+        
+        visualize (bool): 시각화 이미지 생성 여부 (기본값: True)
+            True: 각 시나리오에 대해 PNG 이미지 생성
+            False: JSON만 생성 (처리 속도 향상)
+        
+        max_scenarios (int): 처리할 최대 시나리오 수 (기본값: -1)
+            -1: 전체 시나리오 처리
+            양수: 해당 개수만 처리 (테스트용)
+        
+        step_size (int): 시나리오 윈도우 생성 스텝 크기 (기본값: 1)
+            1: 모든 가능한 윈도우 생성 (가장 조밀한 샘플링)
+            큰 값: 해당 간격으로 샘플링 (예: 100 = 100 프레임마다 윈도우 생성)
+    
+    처리 과정:
+        1. 맵 데이터 로딩
+           - MapManager 초기화
+           - SQLite 맵 데이터베이스 로드
+           - STRtree 공간 인덱스 구축
+        
+        2. JSON 로그 로딩 및 파싱
+           - JsonLogLoader를 사용하여 JSON 파일 로드
+           - 각 엔트리를 LogEntry로 변환
+           - 좌표계 변환 (로컬 → UTM)
+        
+        3. 시나리오 윈도우 추출
+           - 101-epoch 윈도우 생성 (과거 40 + 현재 1 + 미래 60)
+           - step_size에 따라 샘플링
+           - 유효한 범위 내에서만 윈도우 생성
+        
+        4. 시나리오 분류
+           - ScenarioLabeler를 사용하여 각 윈도우 분류
+           - 4단계 분류 파이프라인 실행
+           - 라벨 및 신뢰도 할당
+        
+        5. JSON 출력
+           - 각 시나리오를 개별 JSON 파일로 저장
+           - scenarios_summary.json 생성
+        
+        6. 시각화 (선택적)
+           - CustomScenarioVisualizer를 사용하여 PNG 이미지 생성
+           - Ego 중심 좌표계로 시각화
+    
+    출력:
+        - JSON 파일: output_dir_json/scenario_XXXXXX.json
+        - 요약 파일: output_dir_json/scenarios_summary.json
+        - 이미지 파일 (visualize=True): output_dir_viz/scenario_XXXXXX.png
+    
+    참조:
+        - doc/01_architecture.md: 전체 파이프라인 설명
+        - doc/03_scenario_labeler.md: 분류 알고리즘 상세
+        - doc/06_visualization.md: 시각화 시스템 설명
     
     입력 파라미터:
         log_file_path: JSON 로그 파일 경로
