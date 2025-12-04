@@ -342,7 +342,7 @@ def _compute_jerk(self, ego_states: List[EgoState]) -> float:
         accels.append(accel_mag)
     
     # Jerk = 가속도 변화율
-    jerk = (accels[-1] - accels[0]) / (len(accels) * self.dt)
+    jerk = (accels[-1] - accels[0]) / ((len(accels) - 1) * self.dt)
     return jerk
 ```
 

@@ -484,7 +484,7 @@ class ScenarioLabeler:
             accel_mag = math.sqrt(ax**2 + ay**2)
             accels.append(accel_mag)
         
-        jerk = (accels[-1] - accels[0]) / (len(accels) * self.dt)
+        jerk = (accels[-1] - accels[0]) / ((len(accels) - 1) * self.dt)
         return jerk
     
     def _compute_lateral_acceleration(self, ego_states: List[EgoState]) -> float:
