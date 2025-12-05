@@ -1488,25 +1488,52 @@ class CustomScenarioVisualizer:
         
         Returns:
             bool: 저장 성공 여부
+                True: 저장 성공
+                False: 저장 실패 (권한 오류, 디스크 공간 부족, 파일 변환 오류 등)
         
         처리 과정:
             1. 출력 디렉토리 생성
             2. RGB → BGR 변환 (OpenCV는 BGR 사용)
             3. PNG 파일로 저장
             4. 파일 생성 확인
+        
+        Note:
+            예외가 발생해도 False를 반환하며 프로그램이 중단되지 않습니다.
+            오류 메시지는 표준 출력에 출력됩니다.
         """
         try:
             import cv2
             
             # Ensure output directory exists
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            output_dir = os.path.dirname(save_path)
+            if output_dir:  # 빈 문자열이 아닌 경우에만 디렉토리 생성
+                try:
+                    os.makedirs(output_dir, exist_ok=True)
+                except PermissionError as e:
+                    print(f"   Warning: Permission denied when creating directory: {output_dir}")
+                    print(f"   Details: {e}")
+                    return False
+                except OSError as e:
+                    print(f"   Warning: OS error when creating directory: {output_dir}")
+                    print(f"   Details: {e}")
+                    return False
             
             # Convert RGB to BGR for OpenCV
-            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            success = cv2.imwrite(save_path, img_bgr)
+            try:
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+            except Exception as e:
+                print(f"   Warning: Failed to convert image color space: {e}")
+                return False
+            
+            # Write image file
+            try:
+                success = cv2.imwrite(save_path, img_bgr)
+            except Exception as e:
+                print(f"   Warning: cv2.imwrite raised exception for {save_path}: {e}")
+                return False
             
             if not success:
-                print(f"   Warning: cv2.imwrite failed for {save_path}")
+                print(f"   Warning: cv2.imwrite failed for {save_path} (possibly disk full or permission issue)")
                 return False
                 
             # Verify file was created
@@ -1601,6 +1628,12 @@ class ScenarioExporter:
         
         파일 형식:
             UTF-8 인코딩, 들여쓰기 2칸, ensure_ascii=False (한글 지원)
+        
+        Raises:
+            PermissionError: 출력 디렉토리나 파일에 대한 쓰기 권한이 없는 경우
+            OSError: 파일 시스템 오류가 발생한 경우 (디스크 공간 부족 등)
+            TypeError: JSON 직렬화 중 타입 오류가 발생한 경우
+            ValueError: JSON 직렬화 중 값 오류가 발생한 경우
         """
         ego = window.ego_current
         speed = math.sqrt(
@@ -1774,8 +1807,31 @@ class ScenarioExporter:
         
         scenario_dict['observation_data'] = observation_data
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(scenario_dict, f, indent=2, ensure_ascii=False)
+        try:
+            # Ensure output directory exists
+            output_dir = os.path.dirname(output_path)
+            if output_dir:  # 빈 문자열이 아닌 경우에만 디렉토리 생성
+                os.makedirs(output_dir, exist_ok=True)
+            
+            # Write JSON file
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(scenario_dict, f, indent=2, ensure_ascii=False)
+        except PermissionError as e:
+            print(f"Error: Permission denied when writing to {output_path}")
+            print(f"   Details: {e}")
+            raise
+        except OSError as e:
+            print(f"Error: OS error when writing to {output_path}")
+            print(f"   Details: {e}")
+            raise
+        except (TypeError, ValueError) as e:
+            print(f"Error: JSON serialization failed for scenario {window.center_idx}")
+            print(f"   Details: {e}")
+            raise
+        except Exception as e:
+            print(f"Error: Unexpected error when exporting scenario to {output_path}")
+            print(f"   Details: {e}")
+            raise
     
     @staticmethod
     def export_batch(windows: List[ScenarioWindow], output_dir: str):
@@ -1818,13 +1874,42 @@ class ScenarioExporter:
             1. 출력 디렉토리 생성
             2. 각 시나리오를 개별 JSON 파일로 저장
             3. 요약 파일 생성
-        """
-        os.makedirs(output_dir, exist_ok=True)
         
+        Raises:
+            PermissionError: 출력 디렉토리나 파일에 대한 쓰기 권한이 없는 경우
+            OSError: 파일 시스템 오류가 발생한 경우 (디스크 공간 부족 등)
+            TypeError: JSON 직렬화 중 타입 오류가 발생한 경우
+            ValueError: JSON 직렬화 중 값 오류가 발생한 경우
+        
+        Note:
+            개별 시나리오 파일 저장 실패 시에도 나머지 시나리오 처리를 계속 진행합니다.
+            실패한 시나리오 수는 최종 출력 메시지에 표시됩니다.
+        """
+        # Create output directory with exception handling
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+        except PermissionError as e:
+            print(f"Error: Permission denied when creating output directory: {output_dir}")
+            print(f"   Details: {e}")
+            raise
+        except OSError as e:
+            print(f"Error: OS error when creating output directory: {output_dir}")
+            print(f"   Details: {e}")
+            raise
+        
+        # Export individual scenario files with error tracking
+        success_count = 0
+        error_count = 0
         for window in windows:
-            filename = f"scenario_{window.center_idx:06d}.json"
-            output_path = os.path.join(output_dir, filename)
-            ScenarioExporter.export_scenario(window, output_path)
+            try:
+                filename = f"scenario_{window.center_idx:06d}.json"
+                output_path = os.path.join(output_dir, filename)
+                ScenarioExporter.export_scenario(window, output_path)
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                print(f"Warning: Failed to export scenario {window.center_idx}: {e}")
+                # Continue processing remaining scenarios
         
         # Summary file
         summary = {
@@ -1842,10 +1927,25 @@ class ScenarioExporter:
         }
         
         summary_path = os.path.join(output_dir, 'scenarios_summary.json')
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            json.dump(summary, f, indent=2)
+        try:
+            with open(summary_path, 'w', encoding='utf-8') as f:
+                json.dump(summary, f, indent=2)
+        except PermissionError as e:
+            print(f"Error: Permission denied when writing summary file: {summary_path}")
+            print(f"   Details: {e}")
+            raise
+        except OSError as e:
+            print(f"Error: OS error when writing summary file: {summary_path}")
+            print(f"   Details: {e}")
+            raise
+        except (TypeError, ValueError) as e:
+            print(f"Error: JSON serialization failed for summary file")
+            print(f"   Details: {e}")
+            raise
         
-        print(f"\nExported {len(windows)} scenarios to: {output_dir}")
+        print(f"\nExported {success_count}/{len(windows)} scenarios to: {output_dir}")
+        if error_count > 0:
+            print(f"   Warning: {error_count} scenario(s) failed to export")
 
 
 def process_log_file(log_file_path: str, 
@@ -1949,10 +2049,21 @@ def process_log_file(log_file_path: str,
     
     print(f"지도 파일 경로: {map_file_path}")
     
-    # 지도 파일이 없는 경우 exit
+    # 지도 파일 검증 및 예외처리
     if not os.path.exists(map_file_path):
-        print("Map file not found")
-        sys.exit(0)
+        abs_path = os.path.abspath(map_file_path)
+        raise FileNotFoundError(
+            f"Map file not found: {map_file_path}\n"
+            f"   Absolute path: {abs_path}\n"
+            f"   Please check if the file exists and the path is correct."
+        )
+    
+    if not os.path.isfile(map_file_path):
+        abs_path = os.path.abspath(map_file_path)
+        raise ValueError(
+            f"Map file path is not a file: {map_file_path}\n"
+            f"   Absolute path: {abs_path}"
+        )
             
     
     # 맵 매니저 초기화
@@ -2037,7 +2148,16 @@ def process_log_file(log_file_path: str,
     # Visualize
     if visualize:
         print(f"\n5. Creating visualizations")
-        os.makedirs(output_dir_viz, exist_ok=True)
+        try:
+            os.makedirs(output_dir_viz, exist_ok=True)
+        except PermissionError as e:
+            print(f"Error: Permission denied when creating visualization directory: {output_dir_viz}")
+            print(f"   Details: {e}")
+            raise
+        except OSError as e:
+            print(f"Error: OS error when creating visualization directory: {output_dir_viz}")
+            print(f"   Details: {e}")
+            raise
         
         print("   Initializing CustomScenarioVisualizer...")
         visualizer = CustomScenarioVisualizer(map_manager=map_manager)
