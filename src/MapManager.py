@@ -1,3 +1,30 @@
+"""
+맵 데이터 관리자 모듈
+
+이 모듈은 SQLite 기반 맵 데이터베이스를 관리하고 공간 쿼리를 제공합니다.
+NuPlan 프레임워크와 호환되는 맵 데이터 구조를 제공하며, STRtree 기반
+공간 인덱싱을 사용하여 효율적인 공간 쿼리를 지원합니다.
+
+주요 기능:
+- SQLite 맵 데이터베이스 로딩
+- 다양한 맵 레이어 관리 (Lane, LaneConnector, Roadblock, StopLine, Crosswalk 등)
+- STRtree 기반 공간 인덱싱
+- 근접 맵 객체 쿼리
+- 차선 그래프 구조 관리
+
+맵 레이어:
+- LANE: 차선
+- LANE_CONNECTOR: 차선 연결부 (교차로 등)
+- ROADBLOCK: 도로 블록
+- ROADBLOCK_CONNECTOR: 도로 블록 연결부
+- STOP_LINE: 정지선
+- CROSSWALK: 횡단보도
+- CARPARK_AREA: 주차장 영역
+
+참조:
+    - doc/01_architecture.md: MapManager 역할 및 맵 관리 설명
+"""
+
 from __future__ import annotations
 
 import math
@@ -15,14 +42,14 @@ import numpy as np
 
 # 맵 레이어 이름 상수
 LAYER_LANE = "LANE"                          # 차선 레이어
-LAYER_LANE_CONNECTOR = "LANE_CONNECTOR"      # 차선 연결부 레이어
+LAYER_LANE_CONNECTOR = "LANE_CONNECTOR"      # 차선 연결부 레이어 (교차로 등)
 LAYER_ROADBLOCK = "ROADBLOCK"                # 도로 블록 레이어
 LAYER_ROADBLOCK_CONNECTOR = "ROADBLOCK_CONNECTOR"  # 도로 블록 연결부 레이어
 LAYER_STOP_LINE = "STOP_LINE"                # 정지선 레이어
 LAYER_CROSSWALK = "CROSSWALK"                # 횡단보도 레이어
 LAYER_CARPARK_AREA = "CARPARK_AREA"          # 주차장 영역 레이어
 
-LayerLike = Union[str, object]  # 레이어를 나타내는 타입 (문자열 또는 객체)
+LayerLike = Union[str, object]  # 레이어를 나타내는 타입 (문자열 또는 NuPlan SemanticMapLayer 객체)
 
 
 @dataclass(eq=False)
@@ -361,12 +388,57 @@ class PedestrianLight:
 
 class MapManager:
     """
-    SQLite 기반 map data 관리자 클래스
+    SQLite 기반 맵 데이터베이스를 관리하고 공간 쿼리를 제공하는 클래스.
+    
+    MapManager는 데이터 로딩 레이어의 핵심 컴포넌트로, SQLite 맵 데이터베이스를
+    로드하고 STRtree 기반 공간 인덱싱을 구축하여 효율적인 공간 쿼리를 제공합니다.
+    
+    주요 기능:
+    1. SQLite 맵 데이터베이스 로딩
+    2. 다양한 맵 레이어 관리 (Lane, LaneConnector, Roadblock, StopLine, Crosswalk 등)
+    3. STRtree 기반 공간 인덱싱 (O(log n) 공간 쿼리 성능)
+    4. 근접 맵 객체 쿼리 (get_proximal_map_objects, get_nearest_lane 등)
+    5. 차선 그래프 구조 관리 (successors, predecessors)
+    
+    사용 방법:
+        1. MapManager 인스턴스 생성
+        2. initialize_all_layers() 호출하여 맵 데이터 로드
+        3. 공간 쿼리 API 사용 (get_proximal_map_objects, get_nearest_lane 등)
+    
+    공간 인덱싱:
+        STRtree (Sort-Tile-Recursive tree)를 사용하여 공간 쿼리 성능을 최적화합니다.
+        각 레이어별로 별도의 STRtree를 구축하여 O(log n) 시간 복잡도로
+        근접 객체를 검색할 수 있습니다.
+    
+    참조:
+        - doc/01_architecture.md: MapManager 역할 및 맵 관리 설명
     """
 
     def __init__(self, sqlite_path: str) -> None:
         """
-        입력: sqlite_path - SQLite 맵 데이터베이스 파일 경로
+        MapManager 초기화.
+        
+        Args:
+            sqlite_path (str): SQLite 맵 데이터베이스 파일 경로
+                DefaultParams.MAP_FILE_PATH에서 지정된 경로를 사용합니다.
+        
+        Raises:
+            FileNotFoundError: SQLite 파일이 존재하지 않는 경우
+        
+        Attributes:
+            sqlite_path (str): SQLite 파일 경로
+            _lanes (Dict[str, Lane]): 차선 객체 딕셔너리
+            _lane_connectors (Dict[str, LaneConnector]): 차선 연결부 객체 딕셔너리
+            _roadblocks (Dict[str, Roadblock]): 도로 블록 객체 딕셔너리
+            _stop_lines (Dict[str, StopLine]): 정지선 객체 딕셔너리
+            _crosswalks (Dict[str, Crosswalk]): 횡단보도 객체 딕셔너리
+            _lane_tree (Optional[STRtree]): 차선 공간 인덱스 (initialize_all_layers() 후 생성)
+            _lc_tree (Optional[STRtree]): 차선 연결부 공간 인덱스
+            _rb_tree (Optional[STRtree]): 도로 블록 공간 인덱스
+            _sl_tree (Optional[STRtree]): 정지선 공간 인덱스
+            _cw_tree (Optional[STRtree]): 횡단보도 공간 인덱스
+            _lane_successors (Dict[str, List[str]]): 차선 후속 차선 매핑
+            _lane_predecessors (Dict[str, List[str]]): 차선 선행 차선 매핑
         """
         if not os.path.exists(sqlite_path):  # 파일 존재 여부 확인
             raise FileNotFoundError(f"SQLite not found: {sqlite_path}")
@@ -431,8 +503,47 @@ class MapManager:
     # Initialization / loading
     # ----------------------------
     def initialize_all_layers(self) -> None:
+        """
+        모든 맵 레이어를 로드하고 공간 인덱스를 구축합니다.
+        
+        이 메서드는 MapManager 사용 전에 반드시 호출해야 합니다.
+        SQLite 데이터베이스에서 모든 맵 레이어를 로드하고, 객체 그래프를 연결한 후,
+        STRtree 공간 인덱스를 구축합니다.
+        
+        로드되는 레이어:
+            1. Lanes (차선)
+            2. LaneConnectors (차선 연결부)
+            3. Roadblocks (도로 블록)
+            4. RoadblockConnectors (도로 블록 연결부)
+            5. StopLines (정지선)
+            6. Crosswalks (횡단보도)
+            7. CarparkAreas (주차장 영역, 선택적)
+            8. Lanesides (차선 측면, 선택적)
+            9. RoadLights (도로 신호등, 선택적)
+            10. PedestrianLights (보행자 신호등, 선택적)
+        
+        처리 과정:
+            1. SQLite 데이터베이스 연결
+            2. 각 레이어 로드 (_load_* 메서드 호출)
+            3. 차선 그래프 로드 (_load_lane_graph)
+            4. 객체 그래프 연결 (_wire_graphs)
+            5. STRtree 공간 인덱스 구축 (각 레이어별)
+        
+        공간 인덱싱:
+            각 레이어의 기하학적 형상(polygon, linestring)을 STRtree에 추가하여
+            효율적인 공간 쿼리를 가능하게 합니다.
+        
+        사용 예시:
+            map_manager = MapManager("src/map.sqlite")
+            map_manager.initialize_all_layers()
+            # 이제 공간 쿼리 API 사용 가능
+        
+        참조:
+            - doc/01_architecture.md: 맵 데이터 로딩 과정 설명
+        """
         conn = sqlite3.connect(self.sqlite_path)
         try:
+            # 각 맵 레이어 로드
             self._load_lanes(conn)
             self._load_lane_connectors(conn)
             self._load_roadblocks(conn)
@@ -443,14 +554,14 @@ class MapManager:
             self._load_lanesides(conn)
             self._load_roadlights(conn)
             self._load_pedestrian_lights(conn)
-            self._load_lane_graph(conn)
+            self._load_lane_graph(conn)  # 차선 그래프 구조 로드
         finally:
             conn.close()
 
-        # Wire object graphs
+        # 객체 그래프 연결 (outgoing_edges, incoming_edges 등)
         self._wire_graphs()
 
-        # Build STRtrees
+        # STRtree 공간 인덱스 구축 (각 레이어별)
         if self._lanes:
             self._lane_geoms, self._lane_ids, self._lane_gid_map = [], [], {}
             for lid, obj in self._lanes.items():
@@ -864,12 +975,64 @@ class MapManager:
         raise TypeError(f"Unsupported point-like input for XY coercion: {type(point_like)}")
 
     def get_proximal_map_objects(self, point, radius: float, layers: Iterable[LayerLike]) -> Dict[LayerLike, List[object]]:
+        """
+        지정된 반경 내의 근접 맵 객체들을 조회합니다.
+        
+        STRtree 공간 인덱스를 사용하여 효율적으로 근접 객체를 검색합니다.
+        이 메서드는 시각화나 시나리오 분류에서 주변 맵 요소를 조회할 때 사용됩니다.
+        
+        Args:
+            point: 쿼리 기준점
+                다음 형식을 지원합니다:
+                - Tuple[float, float]: (x, y) 좌표
+                - List[float]: [x, y] 좌표
+                - 객체: .x, .y 속성을 가진 객체
+                - 객체: .array 속성을 가진 객체 (첫 두 요소가 x, y)
+                - 객체: .center 또는 .point 속성을 가진 객체
+            
+            radius (float): 검색 반경 (미터)
+                이 반경 내의 맵 객체들을 검색합니다.
+                예: 30.0 (30미터 반경)
+            
+            layers (Iterable[LayerLike]): 조회할 맵 레이어 리스트
+                예: [LAYER_LANE, LAYER_LANE_CONNECTOR, LAYER_CROSSWALK]
+                또는 NuPlan의 SemanticMapLayer 열거형 사용 가능
+        
+        Returns:
+            Dict[LayerLike, List[object]]: 레이어별 맵 객체 리스트
+                {
+                    LAYER_LANE: [Lane, Lane, ...],
+                    LAYER_LANE_CONNECTOR: [LaneConnector, ...],
+                    LAYER_CROSSWALK: [Crosswalk, ...],
+                    ...
+                }
+                각 레이어에 대해 반경 내의 객체 리스트를 반환합니다.
+        
+        성능:
+            STRtree를 사용하여 O(log n) 시간 복잡도로 검색합니다.
+            n은 해당 레이어의 객체 수입니다.
+        
+        사용 예시:
+            # Ego 차량 주변 30미터 내의 차선과 횡단보도 조회
+            query_point = Point2D(ego_state.rear_axle.x, ego_state.rear_axle.y)
+            objects = map_manager.get_proximal_map_objects(
+                query_point, 
+                radius=30.0,
+                layers=[SemanticMapLayer.LANE, SemanticMapLayer.CROSSWALK]
+            )
+            lanes = objects[SemanticMapLayer.LANE]
+            crosswalks = objects[SemanticMapLayer.CROSSWALK]
+        
+        참조:
+            - doc/01_architecture.md: 맵 쿼리 API 설명
+            - doc/06_visualization.md: 시각화에서 맵 쿼리 사용
+        """
         try:
             px, py = self._coerce_xy(point)
         except Exception:
             px, py = point  # best-effort fallback
         p = Point(px, py)
-        query_geom = p.buffer(radius).envelope
+        query_geom = p.buffer(radius).envelope  # 반경 내의 바운딩 박스 생성
 
         results: Dict[LayerLike, List[object]] = {}
         for layer in layers:
@@ -1164,6 +1327,38 @@ class MapManager:
         return list(self._pair_to_connectors.get((str(from_lane_id), str(to_lane_id)), []))
 
     def get_nearest_lane(self, point_xy: Tuple[float, float], search_radius: float = 50.0) -> Tuple[Optional[str], float]:
+        """
+        지정된 점에서 가장 가까운 차선을 조회합니다.
+        
+        STRtree 공간 인덱스를 사용하여 효율적으로 가장 가까운 차선을 검색합니다.
+        JsonLogLoader에서 신호등 파싱 시 Ego 차량이 위치한 차선을 찾는 데 사용됩니다.
+        
+        Args:
+            point_xy (Tuple[float, float]): 쿼리 기준점 (x, y) - UTM 좌표계 (미터)
+                예: (230388.61912, 424695.37128)
+            
+            search_radius (float): 검색 반경 (미터, 기본값: 50.0)
+                이 반경 내에서 가장 가까운 차선을 검색합니다.
+                결과가 없으면 자동으로 반경을 확장하여 재검색합니다.
+        
+        Returns:
+            Tuple[Optional[str], float]: (차선 ID, 거리)
+                - 차선 ID: 가장 가까운 차선의 ID (문자열)
+                - 거리: 점에서 차선까지의 유클리드 거리 (미터)
+                차선을 찾지 못한 경우 (None, math.inf)를 반환합니다.
+        
+        사용 예시:
+            # Ego 차량 위치에서 가장 가까운 차선 조회
+            x = ego_state.rear_axle.x
+            y = ego_state.rear_axle.y
+            lane_id, distance = map_manager.get_nearest_lane((x, y), search_radius=50.0)
+            if lane_id is not None:
+                print(f"Nearest lane: {lane_id}, distance: {distance:.2f}m")
+        
+        참조:
+            - JsonLogLoader.parse_traffic_light(): 신호등 파싱에서 사용
+            - doc/01_architecture.md: 맵 쿼리 API 설명
+        """
         lane_id, dist = self.get_distance_to_nearest_map_object(point_xy, LAYER_LANE, search_radius)
         return lane_id, dist
 
