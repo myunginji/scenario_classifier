@@ -441,7 +441,18 @@ class MapManager:
             _lane_predecessors (Dict[str, List[str]]): 차선 선행 차선 매핑
         """
         if not os.path.exists(sqlite_path):  # 파일 존재 여부 확인
-            raise FileNotFoundError(f"SQLite not found: {sqlite_path}")
+            abs_path = os.path.abspath(sqlite_path)
+            raise FileNotFoundError(
+                f"SQLite database file not found: {sqlite_path}\n"
+                f"   Absolute path: {abs_path}\n"
+                f"   Please check if the file exists and the path is correct."
+            )
+        if not os.path.isfile(sqlite_path):
+            abs_path = os.path.abspath(sqlite_path)
+            raise ValueError(
+                f"SQLite path is not a file: {sqlite_path}\n"
+                f"   Absolute path: {abs_path}"
+            )
         self.sqlite_path = sqlite_path  # SQLite 파일 경로 저장
 
         self._lanes: Dict[str, Lane] = {}
@@ -540,8 +551,32 @@ class MapManager:
         
         참조:
             - doc/01_architecture.md: 맵 데이터 로딩 과정 설명
+        
+        Raises:
+            sqlite3.Error: SQLite 데이터베이스 오류가 발생한 경우
+            sqlite3.OperationalError: 데이터베이스 파일 잠금, 손상 등의 운영 오류가 발생한 경우
         """
-        conn = sqlite3.connect(self.sqlite_path)
+        try:
+            conn = sqlite3.connect(self.sqlite_path)
+        except sqlite3.OperationalError as e:
+            abs_path = os.path.abspath(self.sqlite_path)
+            raise sqlite3.OperationalError(
+                f"Failed to connect to SQLite database: {self.sqlite_path}\n"
+                f"   Absolute path: {abs_path}\n"
+                f"   This may be due to:\n"
+                f"   - Database file is locked by another process\n"
+                f"   - Database file is corrupted\n"
+                f"   - Insufficient permissions to access the file\n"
+                f"   Original error: {e}"
+            ) from e
+        except sqlite3.Error as e:
+            abs_path = os.path.abspath(self.sqlite_path)
+            raise sqlite3.Error(
+                f"SQLite error when connecting to database: {self.sqlite_path}\n"
+                f"   Absolute path: {abs_path}\n"
+                f"   Details: {e}"
+            ) from e
+        
         try:
             # 각 맵 레이어 로드
             self._load_lanes(conn)
