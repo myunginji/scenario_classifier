@@ -25,6 +25,7 @@ JSON 로그 파일 로더 모듈
 
 # JSON 처리 및 수치 계산 라이브러리
 import json
+import os
 import numpy as np
 from typing import List, Dict, Any, Optional, Union
 
@@ -154,6 +155,9 @@ class JsonLogLoader:
         
         Raises:
             FileNotFoundError: 로그 파일이 존재하지 않는 경우 (에러 메시지 출력 후 빈 리스트 반환)
+            PermissionError: 파일 읽기 권한이 없는 경우 (에러 메시지 출력 후 빈 리스트 반환)
+            OSError: 파일 시스템 오류가 발생한 경우 (에러 메시지 출력 후 빈 리스트 반환)
+            UnicodeDecodeError: 파일 인코딩 문제가 발생한 경우 (에러 메시지 출력 후 빈 리스트 반환)
             json.JSONDecodeError: JSON 형식이 잘못된 경우 (에러 메시지 출력 후 빈 리스트 반환)
         
         참조:
@@ -164,10 +168,34 @@ class JsonLogLoader:
                 self.data = json.load(file)
             return self.data
         except FileNotFoundError:
+            abs_path = os.path.abspath(self.log_file_path)
             print(f"Error: Log file not found at {self.log_file_path}")
+            print(f"   Absolute path: {abs_path}")
+            return []
+        except PermissionError as e:
+            abs_path = os.path.abspath(self.log_file_path)
+            print(f"Error: Permission denied when reading log file: {self.log_file_path}")
+            print(f"   Absolute path: {abs_path}")
+            print(f"   Details: {e}")
+            return []
+        except OSError as e:
+            abs_path = os.path.abspath(self.log_file_path)
+            print(f"Error: OS error when reading log file: {self.log_file_path}")
+            print(f"   Absolute path: {abs_path}")
+            print(f"   Details: {e}")
+            return []
+        except UnicodeDecodeError as e:
+            abs_path = os.path.abspath(self.log_file_path)
+            print(f"Error: Encoding error when reading log file: {self.log_file_path}")
+            print(f"   Absolute path: {abs_path}")
+            print(f"   Expected encoding: utf-8")
+            print(f"   Details: {e}")
             return []
         except json.JSONDecodeError as e:
-            print(f"Error: Invalid JSON format in {self.log_file_path}: {e}")
+            abs_path = os.path.abspath(self.log_file_path)
+            print(f"Error: Invalid JSON format in {self.log_file_path}")
+            print(f"   Absolute path: {abs_path}")
+            print(f"   Line {e.lineno}, Column {e.colno}: {e.msg}")
             return []
     
     def parse_ego_state(self, ego_data: Dict[str, Any], timestamp_us: int) -> EgoState:
